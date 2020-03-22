@@ -171,7 +171,6 @@ toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 toolbox.register("mutate", tools.mutGaussian, mu=1.0, sigma=0.5, indpb=0.5)
 toolbox.register("mate", tools.cxTwoPoint)
 toolbox.register("select", tools.selTournament, tournsize=50)  # # tools.selNSGA2 # tools.selTournament, tournsize=50
-print("selTournament")
 
 
 def main(argv):

@@ -184,8 +184,8 @@ class UserInterface(object):
         legend1 = HTML(value='<style>div.a {line-height: normal;}</style>'
                              '<div class="a"> <br><b>Diameter</b> is given in pixels and its value should be odd. It '
                              'refers to the diameter of the particles to be identified by the software. '
-                             ' <b>Min. Mass</b> is also given in '
-                             'pixels and refers to the minimal mass particles should have in order to be considered. '
+                             ' <b>Min. Mass</b> '
+                             'refers to the minimal mass (brightness) particles should have in order to be considered. '
                              '<b>Diameter</b> and <b>Min. Mass</b> are related.  <b>Invert</b> '
                              'refers to the color pattern. Use if cells are represented by black objects in original '
                              'raw frames. '
@@ -287,10 +287,19 @@ class UserInterface(object):
                            'In this section, key parameters for event identification, i.e., '
                            '# Frames, # Smooth, and Acc. Thrhld, can be automatically identified using '
                            'an optimization routine. Key parameters are identified by minimizing the difference'
-                           ' between estimated and real number of change of direction for a given set of trajectories. '
-                           'Please provide true values for the desired number of trajectories. Populate set by clicking'
-                           ' on <b>Populate</b>.  '
-                           'Finally, click on <b>Estimate Parameters</b><br /><br /></div>')
+                           ' between the estimated and the real number of change of direction for a given set of '
+                           ' trajectories. To populate the training set, first provide the number of trajectories '
+                           'by adjusting the <b> # Trajectories </b> slider, then click on <b>Populate</b>. A randomly '
+                           'selected training set will appear. Update this list by providing the trajectory ID and its '
+                           'observed number of change of direction. Alternatively, provide the name of an Excel '
+                           'file containing two columns, one for the trajectory ID and one for its respective change '
+                           'of direction. The headers of these columns should be "Trajectory" and "Tumbles", '
+                           'respectively. Once the training set has been loaded from an excel file or manually typed, '
+                           'click on <b>Estimate Parameters</b>. Please note that this step is computationally intensive'
+                           ' and might take several minutes to complete. After the optimization routine is done, '
+                           'the button <b>Show Parameters</b> will appear and you can continue to the '
+                           '<b>Tumbling Frequencies</b> tab. '
+                           '<br /><br /></div>')
         individual = HTML('<b>Analysis of Individual Trajectories</b>')
         description_individual = HTML('Select one trajectory from the list to generate velocity plots.'
                                       ' Time can be adjusted by changing <b>Time Range</b>.')
@@ -298,10 +307,16 @@ class UserInterface(object):
         self.individual_metrix_box = Box()
         self.individual_controllers_box = VBox()
 
-        training_controller_box = HBox([IntSlider(min=0, max=10,
-                                                  value='10', description='# Trajectories:'),
-                                        Button(description='Populate')])
-        training_controller_box.children[1].on_click(self.populate_training_set)
+        training_controller_box = VBox([HBox([IntSlider(min=0, max=10,value='10', description='# Trajectories:'),
+                                        Button(description='Populate')]),
+
+                                        HBox([Text(description='File:', placeholder='Enter Excel File (.xlsx)'),
+                                              Button(description='Load')]),
+                                        ])
+
+        training_controller_box.children[0].children[1].on_click(self.populate_training_set)
+        training_controller_box.children[1].children[1].on_click(self.load_training_set)
+
         training_set = VBox()
         estimate_button = Button(description='Estimate Parameters', disabled=True)
         estimate_button.on_click(self.prepare_genetic_algorithm)
@@ -627,7 +642,7 @@ class UserInterface(object):
         self.trajectories_id = Dropdown(description='Trajectory #', options=self.current_ids)
         self.trajectories_id.observe(handler=self.update_frame_range, type='change', names='value')
         self.trajectories_id.value = self.current_ids[-1]
-        self.box4.children[6].children[0].max = len(self.current_ids)
+        self.box4.children[6].children[0].children[0].max = len(self.current_ids)
 
     def update_frame_range(self, b):
         # b['new'] contains the ID of the particle.
@@ -932,6 +947,8 @@ class UserInterface(object):
 
     def cut_frames(self, b):
         ranges = b.ranges
+        if ranges[0] != 0:
+            return
         self.frames = self.frames[ranges[0]:ranges[1]+1]
         self.box1.children[3].max = len(self.frames) - 1
         self.box1.children[3].value = [0, len(self.frames) - 1]
@@ -1225,9 +1242,11 @@ class UserInterface(object):
     def update_adaptation_curve_table(self):
         if self.box5.children[14].children[0].description == 'Hide Data':
             if self.adaptation_curve_smooth_data is None:
-                self.box5.children[14].children[1].value = generate_adaptation_string(self.adaptation_curve_data, smooth=False)
+                self.box5.children[14].children[1].value = generate_adaptation_string(self.adaptation_curve_data,
+                                                                                      smooth=False)
             else:
-                self.box5.children[14].children[1].value = generate_adaptation_string(self.adaptation_curve_smooth_data, smooth=True)
+                self.box5.children[14].children[1].value = generate_adaptation_string(self.adaptation_curve_smooth_data,
+                                                                                      smooth=True)
 
 
     def calculate_adaptation_time_ensemble(self, data, time_interval, change_dir_thrshld):
@@ -1283,8 +1302,6 @@ class UserInterface(object):
                       '; minimum number of frames: ' + str(self.number_frames.value) + '.'
         html_string += '<br /><br /></div>'
 
-
-        #self.box5.children[14].value = html_string
         self.box5.children[11].children[1].value = html_string
 
     def slice_data_frame(self, data, initial, final):
@@ -1759,7 +1776,7 @@ class UserInterface(object):
 
     def populate_training_set(self, b):
 
-        number_trajectories = int(self.box4.children[6].children[0].value)
+        number_trajectories = int(self.box4.children[6].children[0].children[0].value)
         training_set = [HBox([Dropdown(options=self.current_ids,
                                        value=self.current_ids[random.randint(0, len(self.current_ids)-1)],
                                        description='Trajectory #'),
@@ -1771,6 +1788,40 @@ class UserInterface(object):
         self.box4.children[7].children = training_set
         self.box4.children[9].disabled = False
         self.populate_controller_box_genetic_algorithm()
+
+    def load_training_set(self, b):
+
+        e_file = self.box4.children[6].children[1].children[0].value
+        if e_file == '':
+            print("Please provide the name of the excel file")
+            return
+        try:
+            df = pd.read_excel(e_file)
+        except:
+            print("Excel file does not exist in the provided directory. Please check for typos and try again. "
+                  "Do not forget to include the extension .xlsx in the file name")
+            return
+
+        number_trajectories = df.shape[0]
+
+        # update # Trajectories slider
+        self.box4.children[6].children[0].children[0].value = number_trajectories
+        self.populate_training_set(None)
+
+        # Loop over self.box4.children[7].children to update the training set according to the data in df.
+        training_set = self.box4.children[7].children #
+
+        tr_id = list(df.columns)[0]
+        tumbles = list(df.columns)[1]
+
+        for index, row in df.iterrows():
+            try:
+                training_set[index].children[0].value = row[tr_id]
+                training_set[index].children[1].value = str(row[tumbles])
+            except:
+                print("Trajectory ID = {} with an observed number of tumbles of {} is not contained in the set of "
+                      "observed trajectories. Please adjust the training set correspondingly".format(str(row[tr_id]),
+                                                                                                     str(row[tumbles])))
 
     def populate_controller_box_genetic_algorithm(self):
         advanced_opt_button = Button(description='Show Advanced Options')
@@ -1900,7 +1951,6 @@ class UserInterface(object):
                   self.individuals_bounds[2].value]
 
         if parallel is False:
-                tic = time.time()
                 # Individual definition.
                 IND_SIZE = 3
                 if 'FitnessMin' not in dir(creator):
@@ -1931,11 +1981,8 @@ class UserInterface(object):
                 algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, ngen=generations, verbose=False, halloffame=halloffame)
                 frames_av, smooth, acceleration_threshold = transform_parameters(halloffame[0], bounds)
                 best1 = [frames_av, smooth, acceleration_threshold]
-                toc = time.time()
-                #print("The total time for the GA was %s seconds" % round(toc-tic, 2))
 
         else:
-                tic = time.time()
                 generate_deap_excel_data(self.t1, training_data, self.frames_second.value, self.pixels_micron.value,
                                          self.weights_obj1.value, self.weights_obj2.value, bounds)
                 # call process
@@ -1948,7 +1995,6 @@ class UserInterface(object):
                 call_string += str(generations)
                 call_string += ' population='
                 call_string += str(population)
-                #subprocess.call([call_string])
                 os.system(call_string)
                 # retrieve results
                 results = pd.read_excel('results_deap.xlsx', sheet_name=0, index_col=0)
@@ -1960,8 +2006,6 @@ class UserInterface(object):
                 halloffame = [[halloffame_df.loc[1]["Value"],
                               halloffame_df.loc[2]["Value"],
                               halloffame_df.loc[3]["Value"], ]]
-                toc = time.time()
-                #print("The total time for the GA in parallel was %s seconds" % round(toc - tic, 2))
         self.optimal_parameter_set = best1
         self.optimal_objective_function = self.eval_fitness_function(training_data, bounds, halloffame[0])
 
@@ -2001,7 +2045,6 @@ class UserInterface(object):
                       self.optimal_parameter_set[i],)
             s += '<table><caption>'
             s += 'Obj1: ' + str(self.optimal_objective_function[0]) + '.'
-            # s += ' Obj2: ' + str(round(self.optimal_objective_function[1])) + ' s.'
             s += '</caption></div>'
             html_widget.value = s
 
