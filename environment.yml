@@ -1,0 +1,24 @@
+name: taxispy-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.8
+  - numpy
+  - pandas
+  - matplotlib
+  - ipywidgets
+  - pims
+  - trackpy
+  - ipython
+  - openpyxl
+  - pip
+  - greenlet
+  - pyzmq
+  - jupyter
+  - ipykernel
+  - notebook
+  - pip:
+    - scoop
+    - deap 
+
