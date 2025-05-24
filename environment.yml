@@ -15,6 +15,9 @@ dependencies:
   - pip
   - greenlet
   - pyzmq
+  - jupyter
+  - ipykernel
+  - notebook
   - pip:
     - scoop
     - deap 
