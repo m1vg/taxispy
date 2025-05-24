@@ -13,6 +13,8 @@ dependencies:
   - ipython
   - openpyxl
   - pip
+  - greenlet
+  - pyzmq
   - pip:
     - scoop
     - deap 
