@@ -6,70 +6,169 @@ import random
 # from deap import base
 # from deap import creator
 # from deap import tools
-# import time # Not strictly needed here if full_eval_fitness_function returns time
-# import numpy as np # Already imported in analysis_utils if needed there
+import time
+import numpy as np
 import pandas as pd
-# from detect_peaks import detect_peaks # Now imported by analysis_utils
-
-# Import the centralized analysis functions
-from . import analysis_utils
-
-# Load data from ExcelFile
-# It's good practice to wrap file I/O in try-except
-try:
-    t1_ = pd.read_excel('deap_excel_data.xlsx', sheet_name='t1_trajectories', index_col=0)
-    training_data_ = pd.read_excel('deap_excel_data.xlsx', sheet_name='training_data_details', index_col=0)
-    config_df = pd.read_excel('deap_excel_data.xlsx', sheet_name='config_and_bounds', index_col=0) # Assuming Parameter is index
-
-    # Extract config values more robustly
-    config_values = config_df['Value'].to_dict() # Convert Series to dict for easier access
-    frames_second_ = config_values.get('frames_second')
-    pixels_micron_ = config_values.get('pixels_micron')
-    obj1_weight_ = config_values.get('obj1_weight', 1.0) # Default if not found
-    obj2_weight_ = config_values.get('obj2_weight', 0.0) # Default if not found
-
-    bounds_ = [
-        config_values.get('Frames_bound'),
-        config_values.get('Smooth_bound'),
-        config_values.get('Acceleration_bound')
-    ]
-    if None in [frames_second_, pixels_micron_] or None in bounds_:
-        raise ValueError("One or more required configuration values are missing from deap_excel_data.xlsx.")
-
-except FileNotFoundError:
-    print("Error: deap_excel_data.xlsx not found. This file is required for run_deap_scoop.py.")
-    sys.exit(1)
-except Exception as e:
-    print(f"Error reading or parsing deap_excel_data.xlsx: {e}")
-    sys.exit(1)
+from detect_peaks import detect_peaks
 
 
-# DEAP Individual and Fitness definition
-IND_SIZE = 3 
-# Ensure FitnessMin and Individual are created only once if script is re-run in some contexts
-if not hasattr(creator, "FitnessMin"):
-    creator.create("FitnessMin", base.Fitness, weights=(-obj1_weight_, -obj2_weight_))
-if not hasattr(creator, "Individual"):
+def transform_parameters(parameters, bounds):
+
+    # unpack and transform
+    frames_av = int(abs(parameters[0] * bounds[0]/10))
+    smooth = int(abs(parameters[1] * bounds[1]/10))
+    acceleration_threshold = abs(parameters[2] * bounds[2]/10)
+    return frames_av, smooth, acceleration_threshold
+
+
+def get_peaks_data(t1, frames_second, vel, mph=10):
+    # this function should return the number of change of directions, event duration & frequency of change.
+    # get indices
+    col = vel.columns
+    values = vel[col].dropna().values
+    data = np.asanyarray([i[0] for i in values])
+    peakind = detect_peaks(data, mph=mph)
+    number_peaks = len(peakind)
+
+    # this is done in order to consider changes of direction that consist
+    # of one stop event followed by swimming with a slow velocity
+    if number_peaks == 1:
+        number_peaks = 2
+
+    # get frames for the particle contained in vel.
+    particle = vel.columns.values
+    t_i = t1[t1['particle'] == particle[0]]
+
+    min_value = t_i['frame.1'].iloc[0]
+    max_value = t_i['frame.1'].iloc[-1]
+    time = (max_value - min_value) / frames_second
+
+    # frequency of change
+    change_dir = number_peaks / 2
+    change_dir = np.floor(change_dir)
+
+    frequency = change_dir / time
+
+    return change_dir, time, frequency
+
+
+def calculate_average_vel(vel, threshold=4):
+
+    average_vel = pd.DataFrame(np.nan, index=vel.index, columns=vel.columns)
+    ff = vel.index.values[0]  # first frame
+    for frame in vel.index.values:
+        if frame < ff + threshold - 1:
+            average_vel.loc[frame] = np.mean(vel.loc[:frame].dropna().values)
+        else:
+            average_vel.loc[frame] = np.mean(vel.loc[frame - threshold + 1:frame].dropna().values)
+    return average_vel
+
+
+def calculate_av_acc(frames_second, vel):
+
+    acc_vel = pd.DataFrame(np.nan, index=vel.index.values[1:], columns=vel.columns)
+    for frame in vel.index.values[1:]:
+        acc_vel.loc[frame] = (vel.loc[frame] - vel.loc[frame - 1]) * frames_second
+    return acc_vel
+
+def calculate_vel(data, particleID, frames_second, pixels_micron):
+        # this function gets a data frame containing information of all particles,
+        # a desired particle and return velocity and accelereration data frames
+        particleID = particleID if (isinstance(particleID, int) or isinstance(particleID, list)) else int(particleID)
+
+        # get t_i for the desired particle
+        t_i = data[data['particle'] == particleID]
+
+        # get x and y vectors for the desired particle
+        x = t_i['x']
+        y = t_i['y']
+
+        vel = pd.DataFrame(np.nan, index=t_i.index.values[1:], columns=[particleID])
+        acc_vel = pd.DataFrame(np.nan, index=t_i.index.values[2:], columns=[particleID])
+
+        for frame in x.index.values[1:]:
+            d = ((x.loc[frame] - x.loc[frame - 1]) ** 2 + (y.loc[frame] - y.loc[frame - 1]) ** 2) ** 0.5
+            vel.loc[frame] = d * frames_second / pixels_micron
+            if frame > x.index.values[1]:
+                acc_vel.loc[frame] = (vel.loc[frame] - vel.loc[frame-1]) * frames_second
+
+        return vel, acc_vel
+
+
+def eval_fitness_function(t1, frames_second, pixels_micron, training_data, bounds, parameters):
+    frames_av, smooth, acceleration_threshold = transform_parameters(parameters, bounds)
+    change_dir_vector = []
+    error_vector = []
+    # make sure that frames_av is not zero. If so, set to 1
+    frames_av = frames_av if frames_av != 0 else 1
+
+    tic = time.time()
+    for particle in training_data.index.values:
+
+        # calculate velocity
+        vel, acc = calculate_vel(t1, particle, frames_second, pixels_micron)
+
+        # smooth velocity vector
+        if smooth != 0 and frames_av != 0:
+            av_vel = calculate_average_vel(vel, threshold=frames_av)
+            for x in range(0, smooth - 1):
+                av_vel = calculate_average_vel(av_vel, threshold=frames_av)
+        else:
+            av_vel = vel
+
+        # calculate acceleration
+        av_acc = calculate_av_acc(frames_second, av_vel)
+
+        # get number of change of direction, duration of trajectory and frequency of change of direction
+        a, b, c = get_peaks_data(t1, frames_second, abs(av_acc), acceleration_threshold)
+
+        change_dir_vector.append(a)
+        error_vector.append((a - training_data.loc[particle]['real_chng_dir']) ** 2)
+
+    training_data['estimated_chng_dir'] = change_dir_vector
+    training_data['delta_sqr'] = error_vector
+    total_error = training_data['delta_sqr'].sum()
+    toc = time.time()
+
+    return total_error, toc - tic
+
+#load data from ExcelFile
+t1_ = pd.read_excel('deap_excel_data.xlsx', sheet_name=0, index_col=0)
+training_data_ = pd.read_excel('deap_excel_data.xlsx', sheet_name=1, index_col=0)
+video_properties = pd.read_excel('deap_excel_data.xlsx', sheet_name=2, index_col=0)
+
+frames_second_ = video_properties.loc['frames_second']['Value']
+pixels_micron_ = video_properties.loc['pixels_micron']['Value']
+obj1 = video_properties.loc['obj1']['Value']
+obj2 = video_properties.loc['obj2']['Value']
+
+bounds_ = [video_properties.loc['Frames']['Value'],
+          video_properties.loc['Smooth']['Value'],
+          video_properties.loc['Acceleration']['Value']]
+
+# Individual definition.
+IND_SIZE = 3
+if 'FitnessMin' not in dir(creator):
+    creator.create("FitnessMin", base.Fitness, weights=(-obj1, -obj2))
+else:
+    del creator.FitnessMin
+    creator.create("FitnessMin", base.Fitness, weights=(-obj1,
+                                                        -obj2))
+if 'Individual' not in dir(creator):
+    creator.create("Individual", list, fitness=creator.FitnessMin)
+else:
+    del creator.Individual
     creator.create("Individual", list, fitness=creator.FitnessMin)
 
 toolbox = base.Toolbox()
-toolbox.register("attr_int", random.randint, 1, 10) # GA individuals generated with integers 1-10
+toolbox.register("attr_float", random.random)
+toolbox.register("attr_int", random.randint, 1, 10)
 toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_int, n=IND_SIZE)
+toolbox.register("map", futures.map)
+
+toolbox.register("evaluate", eval_fitness_function, t1_, frames_second_, pixels_micron_, training_data_, bounds_)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-
-# Register the evaluation function from analysis_utils
-# It directly calls full_eval_fitness_function which contains the core logic
-toolbox.register("evaluate", analysis_utils.full_eval_fitness_function, 
-                 t1_df=t1_,  # Note: changed from t1 to t1_df for clarity in analysis_utils
-                 training_data_df=training_data_, 
-                 frames_second=frames_second_, 
-                 pixels_micron=pixels_micron_, 
-                 bounds=bounds_)
-                 # individual_params is passed by DEAP automatically
-
-# Register DEAP operators
-toolbox.register("mate", tools.cxTwoPoint)
-toolbox.register("mutate", tools.mutGaussian, mu=5.0, sigma=2.0, indpb=0.2) # Adjusted mu, sigma for 1-10 range
+toolbox.register("mutate", tools.mutGaussian, mu=1.0, sigma=0.5, indpb=0.5)
 toolbox.register("mate", tools.cxTwoPoint)
 toolbox.register("select", tools.selTournament, tournsize=50)  # # tools.selNSGA2 # tools.selTournament, tournsize=50
 
@@ -99,9 +198,12 @@ def main(argv):
     halloffame = tools.HallOfFame(2)
     algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, ngen=generations, verbose=True, halloffame=halloffame)
 
-    # bounds_ (loaded from Excel) should be used for transforming parameters
-    # halloffame[0] contains the raw parameters (e.g., from 1-10 range) for the best individual.
-    frames_av, smooth, acceleration_threshold = analysis_utils.transform_parameters(halloffame[0], bounds_)
+    bounds_values = pd.read_excel('deap_excel_data.xlsx', sheet_name=2, index_col=0)
+    bound_val = [bounds_values.loc['Frames']['Value'],
+                 bounds_values.loc['Smooth']['Value'],
+                 bounds_values.loc['Acceleration']['Value']]
+
+    frames_av, smooth, acceleration_threshold = transform_parameters(halloffame[0], bound_val)
 
     #export results to excel file
     columns = ['Value']
@@ -110,21 +212,16 @@ def main(argv):
     results_deap = pd.DataFrame(values, index=index, columns=columns)
     results_deap.index.name = 'Parameter'
 
-    # Save raw parameters from halloffame (e.g., values between 1-10)
-    # These are the direct output from the GA before transformation.
-    raw_halloffame_params = halloffame[0] # Best individual's raw parameters
-    index_raw_params = [str(i) for i in range(len(raw_halloffame_params))] # "0", "1", "2"
-    
-    results_halloffame_raw = pd.DataFrame({'Value': raw_halloffame_params}, index=index_raw_params)
-    results_halloffame_raw.index.name = 'RawParameterIndex'
+    index = ["1", "2", "3"]
+    values = [halloffame[0][0], halloffame[0][1], halloffame[0][2]]
+    results_halloffame = pd.DataFrame(values, index=index, columns=columns)
+    results_halloffame.index.name = 'Parameter'
 
-
-    try:
-        with pd.ExcelWriter('results_deap.xlsx') as writer:
-            results_deap.to_excel(writer, sheet_name='results_deap') # Transformed params
-            results_halloffame_raw.to_excel(writer, sheet_name='halloffame_raw') # Raw params
-    except Exception as e:
-        print(f"Error writing results_deap.xlsx: {e}")
+    writer = pd.ExcelWriter('results_deap.xlsx')
+    results_deap.to_excel(writer, 'results_deap')
+    results_halloffame.to_excel(writer, 'halloffame')
+    writer.save()
 
 if __name__ == "__main__":
+    #print(sys.argv)
     main(sys.argv[1:])

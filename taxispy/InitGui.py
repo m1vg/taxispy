@@ -6,8 +6,7 @@ import trackpy as tp
 import ipywidgets as widgets
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from taxispy.detect_peaks import detect_peaks # Used by local self.get_peaks
-from . import analysis_utils # Import the new module
+from taxispy.detect_peaks import detect_peaks
 import math
 import random
 import time
@@ -108,7 +107,7 @@ class UserInterface(object):
         self.acc_vel = None
         self.acc_angular = None
 
-        self.optimal_parameter_set = [4, 3, 10] # Default values
+        self.optimal_parameter_set = [4, 3, 10]
 
         # First, create four boxes, each for one of the four sections.
         self.box0 = VBox()
@@ -700,45 +699,22 @@ class UserInterface(object):
         frame_range.observe(handler=self.print_individual_characterization, type='change', names='value')
 
         if self.interface.selected_index == 4:
-            particle_id = b['new'] 
-            
-            # Prepare DataFrame for the selected particle, indexed by 'frame'
-            # This is the expected input format for analysis_utils.calculate_vel
-            if self.t1 is not None and not self.t1.empty:
-                t1_particle_df = self.t1[self.t1['particle'] == particle_id]
-                if not t1_particle_df.empty:
-                    t1_particle_df_indexed = t1_particle_df.set_index('frame')
-                else: # Particle ID not found or t1 empty for this particle
-                    t1_particle_df_indexed = pd.DataFrame() # Empty DF
-            else: # self.t1 not loaded
-                t1_particle_df_indexed = pd.DataFrame()
-
-            self.vel, self.acc_vel = analysis_utils.calculate_vel(
-                t1_particle_df_indexed, self.frames_second.value, self.pixels_micron.value
-            )
-            
-            smooth_param = int(self.optimal_parameter_set[1])
-            n_frames_param = int(self.optimal_parameter_set[0])
-
-            self.av_vel = self.vel.copy() 
-            if smooth_param > 0 and n_frames_param > 0 and not self.av_vel.empty:
-                for _ in range(smooth_param):
-                    self.av_vel = analysis_utils.calculate_average_vel(self.av_vel, threshold=n_frames_param)
-            
-            if not self.av_vel.empty:
-                self.av_acc_vel = analysis_utils.calculate_av_acc(self.av_vel, self.frames_second.value)
+            particle = b['new'] # original [b['new']]
+            self.vel, self.acc_vel = self.calculate_vel(self.t1, particle)
+            # smooth 0 times.
+            smooth = int(self.optimal_parameter_set[1])
+            n_frames = int(self.optimal_parameter_set[0])
+            if smooth != 0 and n_frames != 0:
+                self.av_vel = self.calculate_average_vel(self.vel, threshold=n_frames)
+                for x in range(0, smooth - 1):
+                    self.av_vel = self.calculate_average_vel(self.av_vel, threshold=n_frames)
             else:
-                self.av_acc_vel = pd.DataFrame() # Empty DF
+                self.av_vel = self.vel
 
+            # calculate acceleration from smoothed data.
+            self.av_acc_vel = self.calculate_av_acc(self.av_vel)
             c = {'new': [min_value, max_value]}
-            
-            # self.get_peaks is a local method for UI update of self.peaks_table
-            if not self.av_acc_vel.empty and len(self.av_acc_vel.columns) > 0:
-                 # Pass the actual series to get_peaks
-                 self.get_peaks(abs(self.av_acc_vel[self.av_acc_vel.columns[0]])) 
-            else: 
-                 self.peaks_table = pd.DataFrame() 
-                 self.peak_height = self.individual_controllers_box.children[4].value 
+            self.get_peaks(abs(self.av_acc_vel))
             self.print_individual_characterization(c)
 
             threshold_mean.time_range = c
@@ -754,144 +730,99 @@ class UserInterface(object):
             smooth_cycles.observe(handler=self.update_average_vel, type='change', names='value')
             acceleration_threshold.observe(handler=self.update_average_vel, type='change', names='value')
 
-    def update_average_vel(self, b): 
-        particle_id = b['owner'].particle 
-        
-        n_frames_param = self.individual_controllers_box.children[2].value
-        smooth_param = self.individual_controllers_box.children[3].value
-        acc_thresh_param_mph = self.individual_controllers_box.children[4].value
+    def update_average_vel(self, b):
+        particle = b['owner'].particle
+        self.vel, self.acc_vel = self.calculate_vel(self.t1, particle)
 
-        if self.t1 is None or self.t1.empty:
-            # Handle cases where self.t1 might not be loaded
-            self.vel, self.acc_vel, self.av_vel, self.av_acc_vel = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-            self.peaks_table = pd.DataFrame()
-            self.peak_height = acc_thresh_param_mph
-            # Update plot with empty data or a message
-            time_range_val = b['owner'].time_range 
-            self.print_individual_characterization(time_range_val)
-            return
+        if b['owner'].description == '# Frames':
+            threshold = b['new']
+            smooth_freq = self.individual_controllers_box.children[3].value
+            mph = self.individual_controllers_box.children[4].value
 
-        t1_particle_df = self.t1[self.t1['particle'] == particle_id]
-        if t1_particle_df.empty: # Particle not found
-             self.vel, self.acc_vel, self.av_vel, self.av_acc_vel = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-             self.peaks_table = pd.DataFrame()
-             self.peak_height = acc_thresh_param_mph
-             time_range_val = b['owner'].time_range
-             self.print_individual_characterization(time_range_val)
-             return
-        
-        t1_particle_df_indexed = t1_particle_df.set_index('frame')
+        if b['owner'].description == '# Smooth':
+            smooth_freq = b['new']
+            threshold = self.individual_controllers_box.children[2].value
+            mph = self.individual_controllers_box.children[4].value
 
-        self.vel, self.acc_vel = analysis_utils.calculate_vel(
-            t1_particle_df_indexed, self.frames_second.value, self.pixels_micron.value
-        )
+        if b['owner'].description == 'Acc. Thrhld':
+            smooth_freq = self.individual_controllers_box.children[3].value
+            threshold = self.individual_controllers_box.children[2].value
+            mph = b['new']
 
-        self.av_vel = self.vel.copy()
-        if smooth_param > 0 and n_frames_param > 0 and not self.av_vel.empty:
-            for _ in range(smooth_param): 
-                self.av_vel = analysis_utils.calculate_average_vel(self.av_vel, threshold=n_frames_param)
-        
-        if not self.av_vel.empty:
-            self.av_acc_vel = analysis_utils.calculate_av_acc(self.av_vel, self.frames_second.value)
+        if smooth_freq != 0 and threshold != 0:
+            self.av_vel = self.calculate_average_vel(self.vel, threshold=threshold)
+            for x in range(0, smooth_freq - 1):
+                self.av_vel = self.calculate_average_vel(self.av_vel, threshold=threshold)
         else:
-            self.av_acc_vel = pd.DataFrame()
-        
-        if not self.av_acc_vel.empty and len(self.av_acc_vel.columns) > 0:
-            # Pass the actual series to get_peaks
-            self.get_peaks(abs(self.av_acc_vel[self.av_acc_vel.columns[0]]), mph=acc_thresh_param_mph)
-        else: 
-            self.peaks_table = pd.DataFrame()
-            self.peak_height = acc_thresh_param_mph
-            
-        time_range_val = b['owner'].time_range 
-        self.print_individual_characterization(time_range_val)
+            self.av_vel = self.vel
 
-    def print_individual_characterization(self, time_range_val_dict):
+        self.av_acc_vel = self.calculate_av_acc(self.av_vel) # or calculate_av_acc
+        c = b['owner'].time_range
+        self.get_peaks(abs(self.av_acc_vel), mph=mph)
+        self.print_individual_characterization(c)
+
+    def print_individual_characterization(self, b):
 
         # target: self.individual_metrix_box
         # actual trajectory is contained in self.trajectories_id.value
         # x = self.t1.set_index(['frame', 'particle'])['x'].unstack()
         # y = self.t1.set_index(['frame', 'particle'])['y'].unstack()
-        # time_range_val_dict is what was 'c' before, e.g. {'new': [min_value, max_value]}
-        time_frame = time_range_val_dict['new'] # Extract the list [min_time, max_time]
-        min_t_val = time_frame[0] 
-        max_t_val = time_frame[1]
-        
+        # vel, angular = self.calculate_vel(x, y)
+
+        time_frame = b['new']
+        min_val = time_frame[0] if time_frame[1] != 0 else 1/self.frames_second.value
+        max_val = time_frame[1]
+        particle = self.trajectories_id.value
+
         self.fig_individual, ((self.ax1_ind, self.ax2_ind),
                               (self.ax3_ind, self.ax4_ind)) = plt.subplots(2, 2,
                                                                            figsize=[15, 10],
                                                                            sharex='all')
-        fs = self.frames_second.value
-        if fs == 0: fs = 1 # Avoid division by zero for plotting if fs is not set
-
-        def time_indexed_df(df, frames_per_second_val):
-            if df is None or df.empty:
-                return pd.DataFrame()
-            # Assuming index is frame numbers for velocity/acceleration DFs
-            new_idx = df.index / frames_per_second_val if frames_per_second_val !=0 else df.index
-            df_time_indexed = df.copy()
-            df_time_indexed.index = new_idx
-            return df_time_indexed
-
-        vel_to_plot = time_indexed_df(self.vel, fs)
-        acc_vel_to_plot = time_indexed_df(self.acc_vel, fs)
-        av_vel_to_plot = time_indexed_df(self.av_vel, fs)
-        av_acc_vel_to_plot = time_indexed_df(self.av_acc_vel, fs)
-        
-        # Ensure peaks_table is also time-indexed for plotting
-        # self.peaks_table index is assumed to be frame numbers from get_peaks
-        peaks_table_to_plot = time_indexed_df(self.peaks_table, fs)
-
-
         # instantaneous velocities
         ax = self.ax1_ind
-        if not vel_to_plot.empty:
-            ax.plot(vel_to_plot.loc[min_t_val:max_t_val], color='blue')
+        ax.plot(self.vel.set_index([self.vel.index.values/self.frames_second.value]).loc[min_val:max_val], color='blue');
         ax.set_ylabel('Linear Velocity, micron/s', color='blue')
         ax.tick_params('y', colors='blue')
         ax.grid(color='grey', linestyle='--', linewidth=0.5)
 
         # instantaneous accelerations
         ax3 = self.ax3_ind
-        if not acc_vel_to_plot.empty:
-            ax3.plot(acc_vel_to_plot.loc[min_t_val:max_t_val], color='grey')
+        ax3.plot(self.acc_vel.set_index([self.acc_vel.index.values/self.frames_second.value]).loc[min_val:max_val],
+                 color='grey');
         ax3.set_ylabel('Acceleration, micron/s/s', color='grey')
         ax3.tick_params('y', colors='grey')
         ax3.grid(color='grey', linestyle='--', linewidth=0.5)
 
         # Average Velocities
         ax5 = self.ax2_ind
-        if not av_vel_to_plot.empty:
-            ax5.plot(av_vel_to_plot.loc[min_t_val:max_t_val], color='blue')
+        ax5.plot(self.av_vel.set_index([self.av_vel.index.values/self.frames_second.value]).loc[min_val:max_val], color='blue');
         ax5.tick_params('y', colors='blue')
 
-        ax6 = ax5.twinx()
-        if not av_acc_vel_to_plot.empty:
-            # Assuming av_acc_vel_to_plot has one column, take abs of that.
-            # If it can have multiple, this needs adjustment.
-            col_to_abs = av_acc_vel_to_plot.columns[0] if len(av_acc_vel_to_plot.columns) > 0 else None
-            if col_to_abs is not None:
-                 ax6.plot(abs(av_acc_vel_to_plot[col_to_abs].loc[min_t_val:max_t_val]), color='grey', alpha=0.5)
+        ax6 = ax5.twinx()  # instantiate a second axes that shares the same x-axis
+        ax6.plot(abs(self.av_acc_vel.set_index([self.av_acc_vel.index.values / self.frames_second.value]).loc[min_val:max_val]),
+                 color='grey', alpha=0.5);
         ax6.set_ylabel('Absolute Acceleration, micron/s/s', color='grey')
         ax6.tick_params('y', colors='grey')
         ax6.grid(color='grey', linewidth=0.5)
 
-        if not peaks_table_to_plot.empty:
-            t_peaks_in_range = peaks_table_to_plot.loc[min_t_val:max_t_val]
-            if not t_peaks_in_range.empty:
-                 ax6.scatter(t_peaks_in_range.index.values, t_peaks_in_range.iloc[:,0].values, marker='*', s=300, alpha=0.5, c='grey')
-        
-        current_mph_threshold = self.individual_controllers_box.children[4].value
-        ax6.plot([min_t_val, max_t_val], [current_mph_threshold, current_mph_threshold], linewidth=2, color='black')
+        t = self.peaks_table.set_index(self.peaks_table.index.values / self.frames_second.value).loc[min_val:max_val]
+        ax6.scatter(t.index.values, t.values,marker='*', s=300, alpha=0.5, c='grey')
+        ax6.grid(color='grey', linestyle='--', linewidth=0.5)
+        try:
+            val = self.individual_controllers_box.children[4].value
+            ax6.plot([min_val, max_val], [val, val], linewidth=2, color='black')
+        except:
+            ax6.plot([min_val, max_val], [self.peak_height, self.peak_height], linewidth=2, color='black')
 
         # Average Accelerations
         ax7 = self.ax4_ind
-        if not av_acc_vel_to_plot.empty:
-            ax7.plot(av_acc_vel_to_plot.loc[min_t_val:max_t_val], color='grey')
-        ax7.plot([min_t_val + (1/fs if fs > 0 else 0), max_t_val], [0, 0], color='black', linestyle='--', alpha=0.5)
+        ax7.plot(self.av_acc_vel.set_index([self.av_acc_vel.index.values/self.frames_second.value]).loc[min_val:max_val],
+                 color='grey');
+        ax7.plot([min_val + 1/self.frames_second.value, max_val], [0, 0], color='black', linestyle='--', alpha=0.5)
         ax7.tick_params('y', colors='grey')
         ax7.grid(color='grey', linestyle='--', linewidth=0.5)
 
+        # set title of all four plots
         self.ax1_ind.set_title('Instantaneous Velocities')
         self.ax2_ind.set_title('Average Velocities')
         self.ax3_ind.set_title('Acceleration (Inst. Vel)')
@@ -899,13 +830,43 @@ class UserInterface(object):
         self.ax4_ind.set_title('Acceleration (Avg. Vel)')
         self.ax4_ind.set_xlabel('Time, s')
 
-        data_fig = self.easy_print(self.fig_individual) 
-        plt.close(self.fig_individual) 
+        data_fig = self.easy_print(ax)
+        plt.close(ax.figure)
 
         self.individual_metrix_box.children = [Image(value=data_fig)]
 
-    # Removed: calculate_vel (moved to analysis_utils)
-    # Removed: calculate_average_vel (moved to analysis_utils)
+    def calculate_vel(self, data, particleID):
+        # this function gets a data frame containing information of all particles,
+        # a desired particle and return velocity and accelereration data frames
+        particleID = particleID if (isinstance(particleID, int) or isinstance(particleID, list)) else int(particleID)
+
+        # get t_i for the desired particle
+        t_i = data[data['particle'] == particleID]
+
+        # get x and y vectors for the desired particle
+        x = t_i['x']
+        y = t_i['y']
+
+        vel = pd.DataFrame(np.nan, index=t_i.index.values[1:], columns=[particleID])
+        acc_vel = pd.DataFrame(np.nan, index=t_i.index.values[2:], columns=[particleID])
+
+        for frame in x.index.values[1:]:
+            d = ((x.loc[frame] - x.loc[frame - 1]) ** 2 + (y.loc[frame] - y.loc[frame - 1]) ** 2) ** 0.5
+            vel.loc[frame] = d * self.frames_second.value / self.pixels_micron.value
+            if frame > x.index.values[1]:
+                acc_vel.loc[frame] = (vel.loc[frame] - vel.loc[frame-1]) * self.frames_second.value
+
+        return vel, acc_vel
+
+    def calculate_average_vel(self, vel, threshold=4):
+        average_vel = pd.DataFrame(np.nan, index=vel.index, columns=vel.columns)
+        ff = vel.index.values[0]  # frist frame
+        for frame in vel.index.values:
+                if frame < ff + threshold-1:
+                    average_vel.loc[frame] = np.mean(vel.loc[:frame].dropna().values)
+                else:
+                    average_vel.loc[frame] = np.mean(vel.loc[frame-threshold+1:frame].dropna().values)
+        return average_vel
 
     def prepare_data_print_histogram(self, data, title):
 
@@ -973,18 +934,10 @@ class UserInterface(object):
         self.box1.children[3].max = len(self.frames)-1
         self.box1.children[3].value = [0, len(self.frames)-1]
         self.box1.children[3].continuous_update = False
-        self.box1.children[3].observe(handler=self.reshape_frames, type='change', names='value') # frame_segment widget
-        
-        if self.frames and len(self.frames) > 0 : # Check if self.frames is not None and not empty
-            max_frame_val = len(self.frames) - 1
-            self.box3.controller_time_frame.max = max_frame_val
-            self.box3.controller_time_frame.value = [0, max_frame_val if max_frame_val > 0 else 0]
-            self.box5.frame_ranges.max = max_frame_val
-            self.box5.frame_ranges.value = [0, max_frame_val if max_frame_val > 0 else 0]
-        else: 
-            self.box3.controller_time_frame.max = 0
-            self.box3.controller_time_frame.value = [0,0]
-            self.box5.frame_ranges.max = 0
+        self.box1.children[3].observe(handler=self.reshape_frames, type='change', names='value')
+        self.box3.controller_time_frame.max = len(self.frames)-1
+        self.box3.controller_time_frame.value = [0, len(self.frames)-1]
+        self.box5.frame_ranges.max = len(self.frames)-1
         self.box5.frame_ranges.value = [0, len(self.frames)-1]
 
     def reshape_frames(self, b):
@@ -1002,53 +955,35 @@ class UserInterface(object):
         self.box3.controller_time_frame.max = len(self.frames)-1
         self.box3.controller_time_frame.value = [0, len(self.frames)-1]
         self.box5.frame_ranges.max = len(self.frames)-1
-            self.box5.frame_ranges.value = [0,0]
+        self.box5.frame_ranges.value = [0, len(self.frames)-1]
 
 
-    def easy_print(self, fig_or_ax):
-        """ Helper to print a Matplotlib figure or axes to a BytesIO buffer. """
-        target_fig = fig_or_ax.figure if hasattr(fig_or_ax, 'figure') else fig_or_ax
+    def easy_print(self, ax):
         buf = BytesIO()
-        canvas = FigureCanvasAgg(target_fig)
+        canvas = FigureCanvasAgg(ax.figure)
         canvas.print_png(buf)
         data_fig = buf.getvalue()
         return data_fig
 
-    # Removed: calculate_av_acc (moved to analysis_utils)
+    def calculate_av_acc(self, vel):
 
-    def get_peaks(self, vel_series_abs, mph=10): # vel_series_abs should be a pd.Series
+        acc_vel = pd.DataFrame(np.nan, index=vel.index.values[1:], columns=vel.columns)
+        for frame in vel.index.values[1:]:
+            acc_vel.loc[frame] = (vel.loc[frame] - vel.loc[frame - 1]) * self.frames_second.value
+        return acc_vel
 
-        # vel_series_abs is the absolute acceleration series (e.g., abs(self.av_acc_vel[col_name]))
-        # This method updates self.peaks_table for UI plotting.
-        
-        # Ensure it's a Series. If it's a DataFrame, this needs to be handled.
-        # The calling context in update_average_vel should pass a Series.
-        if not isinstance(vel_series_abs, pd.Series):
-             # Try to convert if it's a single-column DataFrame
-            if isinstance(vel_series_abs, pd.DataFrame) and len(vel_series_abs.columns) == 1:
-                vel_series_abs = vel_series_abs.iloc[:, 0]
-            else: # Cannot proceed
-                self.peaks_table = pd.DataFrame()
-                self.peak_height = mph # Store the mph used
-                return
+    def get_peaks(self, vel, mph=10):
 
-        vel_series_to_process = vel_series_abs.dropna()
-        if vel_series_to_process.empty:
-            self.peaks_table = pd.DataFrame()
-            self.peak_height = mph
-            return
-            
-        frames_idx = vel_series_to_process.index.values # These are original frame numbers
-        values_np = vel_series_to_process.values
-        
-        # detect_peaks is imported from taxispy.detect_peaks
-        peakind = detect_peaks(values_np, mph=mph) 
-        
-        peak_values_np = values_np[peakind] if peakind.size > 0 else np.array([])
-        peak_frame_np = frames_idx[peakind] if peakind.size > 0 else np.array([])
-        
-        col_name_for_output = vel_series_to_process.name if vel_series_to_process.name is not None else 'peak_value'
-        self.peaks_table = pd.DataFrame({col_name_for_output: peak_values_np}, index=peak_frame_np)
+        # get indices
+        mph = self.individual_controllers_box.children[4].value
+        col = vel.columns
+        frames = vel[col].dropna().index.values
+        values = vel[col].dropna().values
+        data = np.asanyarray([i[0] for i in values])
+        peakind = detect_peaks(data, mph=mph)
+        peak_values = np.asanyarray([data[element] for element in peakind])
+        peak_frame = np.asanyarray([frames[element] for element in peakind])
+        self.peaks_table = pd.DataFrame(peak_values, index=peak_frame, columns=vel.columns)
         self.peak_height = mph
 
     def calculate_ensemble(self, b):
@@ -1086,66 +1021,51 @@ class UserInterface(object):
         results = pd.DataFrame(np.nan, index=id_particles, columns=columns)
         results.index.name = 'Particle'
 
-        # vel_dic, smooth_vel_dic, smooth_acc_dic are local and not used beyond this scope; can be removed.
+        # create dictionaries to store vectors for velocity, smoothed velocity and acceleration.
+        vel_dic = {}
+        smooth_vel_dic = {}
+        smooth_acc_dic ={}
 
-        for particle_id in results.index.values:
-            particle_data_full = self.t1[self.t1['particle'] == particle_id]
-            if particle_data_full.empty or len(particle_data_full) < 2:
-                results.loc[particle_id, ['Mean_vel', 'Change_dir', 'Duration', 'Change_dir_sec']] = np.nan, 0, 0, 0
-                continue
+        for particle in results.index.values:
 
-            particle_data_indexed = particle_data_full.set_index('frame')
+            # calculate velocity
+            vel, acc = self.calculate_vel(self.t1, particle)
+            vel_dic.update({particle: vel})
 
-            vel_df, _ = analysis_utils.calculate_vel(
-                particle_data_indexed, self.frames_second.value, self.pixels_micron.value
-            )
-            if vel_df.empty: 
-                results.loc[particle_id, ['Mean_vel', 'Change_dir', 'Duration', 'Change_dir_sec']] = np.nan, 0, 0, 0
-                continue
-
-            smooth_param = self.box5.children[2].value 
-            n_frames_param = self.box5.children[1].value 
-            
-            av_vel_df = vel_df.copy()
-            if smooth_param > 0 and n_frames_param > 0:
-                for _ in range(smooth_param):
-                    av_vel_df = analysis_utils.calculate_average_vel(av_vel_df, threshold=n_frames_param)
-            
-            if av_vel_df.empty:
-                results.loc[particle_id, ['Mean_vel', 'Change_dir', 'Duration', 'Change_dir_sec']] = np.nan, 0, 0, 0
-                continue
-            
-            av_acc_df = analysis_utils.calculate_av_acc(av_vel_df, self.frames_second.value)
-            if av_acc_df.empty:
-                results.loc[particle_id, ['Mean_vel', 'Change_dir', 'Duration', 'Change_dir_sec']] = np.nan, 0, 0, 0
-                continue
-            
-            mean_vel_val = np.nan
-            if not av_vel_df.empty and len(av_vel_df.columns) > 0:
-                 # Ensure we are taking mean of the correct column if multiple exist (should be one)
-                 mean_vel_val = np.average(av_vel_df[av_vel_df.columns[0]].dropna().values)
-            results.loc[particle_id]['Mean_vel'] = mean_vel_val
-
-            results.loc[particle_id]['x'], \
-            results.loc[particle_id]['y'], \
-            results.loc[particle_id]['First_Time'] = self.get_x_y_time(particle_data_full, particle_id)
-
-            if not av_acc_df.empty and len(av_acc_df.columns) > 0:
-                abs_av_acc_series = abs(av_acc_df[av_acc_df.columns[0]])
-                chng_dir, duration, chng_dir_sec = analysis_utils.get_peaks_data(
-                    particle_data_full, 
-                    self.frames_second.value,
-                    abs_av_acc_series,
-                    self.box5.acceleration.value 
-                )
-                results.loc[particle_id]['Change_dir'] = chng_dir
-                results.loc[particle_id]['Duration'] = duration
-                results.loc[particle_id]['Change_dir_sec'] = chng_dir_sec
+            # smooth velocity vector
+            smooth_cycles = self.box5.children[2].value
+            n_frames = self.box5.children[1].value
+            if smooth_cycles != 0 and n_frames != 0:
+                av_vel = self.calculate_average_vel(vel, threshold=n_frames)
+                for x in range(0, smooth_cycles - 1):
+                    av_vel = self.calculate_average_vel(av_vel, threshold=n_frames)
             else:
-                results.loc[particle_id, ['Change_dir', 'Duration', 'Change_dir_sec']] = 0, 0, 0
-            
-            results.loc[particle_id]['Displacement'], \
-            results.loc[particle_id]['firstFrame'] = get_displacement(self.t1, particle_id)
+                av_vel = vel
+            smooth_vel_dic.update({particle: av_vel})
+
+            # calculate acceleration
+            av_acc = self.calculate_av_acc(av_vel)
+            smooth_acc_dic.update({particle: av_acc})
+
+            # calculate average linear vel for filtering purposes
+            results.loc[particle]['Mean_vel'] = np.average(av_vel.values)
+
+            # get x and y coordinates.
+            # results.loc[particle]['x'], results.loc[particle]['y'] = self.get_x_y(self.t1, particle)
+
+            results.loc[particle]['x'], \
+            results.loc[particle]['y'], \
+            results.loc[particle]['First_Time'] = self.get_x_y_time(self.t1, particle)
+
+            # get number of change of direction, duration of trajectory and frequency of change of direction
+
+            results.loc[particle]['Change_dir'], \
+            results.loc[particle]['Duration'], \
+            results.loc[particle]['Change_dir_sec'] = self.get_peaks_data(abs(av_acc), self.box5.acceleration.value)
+
+            # calculate Displacement based on three point method.
+            results.loc[particle]['Displacement'], \
+            results.loc[particle]['firstFrame'] = get_displacement(self.t1, particle)
 
         # At this point, the data frame 'results' contain data for all particles. Now we need to filter for minimum
         # linear velocity threshold, minimum Displacement and max number of change of direction.
@@ -1416,34 +1336,43 @@ class UserInterface(object):
 
     def get_x_y_time(self, t, particle):
 
-        # particle_df is the DataFrame for the specific particle, already filtered.
-        if particle_df.empty: # Should be t_i from original
-            return np.nan, np.nan, np.nan 
-        
-        # Assuming particle_df (t_i) has 'frame' as a column
-        if 'frame' not in particle_df.columns or particle_df.empty:
-            return particle_df['x'].iloc[0] if 'x' in particle_df.columns and not particle_df.empty else np.nan, \
-                   particle_df['y'].iloc[0] if 'y' in particle_df.columns and not particle_df.empty else np.nan, \
-                   np.nan
+        t_i = t[t['particle'] == particle]
+        return t_i['x'].iloc[0], t_i['y'].iloc[0], t_i['frame'].iloc[0]/self.frames_second.value
 
-        first_x = particle_df['x'].iloc[0]
-        first_y = particle_df['y'].iloc[0]
-        first_frame_val = particle_df['frame'].iloc[0]
-        
-        time_val = np.nan
-        if self.frames_second.value and self.frames_second.value != 0:
-            time_val = first_frame_val / self.frames_second.value
-        return first_x, first_y, time_val
+    def get_x_y(self, t, particle):
 
+        t_i = t[t['particle'] == particle]
+        return t_i['x'].iloc[0], t_i['y'].iloc[0]
 
-    def get_x_y(self, particle_df, particle_id_unused): # particle_id is not used here
-        # particle_df is the DataFrame for the specific particle
-        if particle_df.empty:
-            return np.nan, np.nan
-        return particle_df['x'].iloc[0], particle_df['y'].iloc[0]
+    def get_peaks_data(self, vel, mph=10):
 
-    # Removed: get_peaks_data (functionality moved to analysis_utils.get_peaks_data)
-    # The local self.get_peaks method is for UI peak table updates only.
+        # this function should return the number of change of directions, event duration & frequency of change.
+        # get indices
+        col = vel.columns
+        values = vel[col].dropna().values
+        data = np.asanyarray([i[0] for i in values])
+        peakind = detect_peaks(data, mph=mph)
+        number_peaks = len(peakind)
+
+        # this is done in order to consider changes of direction that consist
+        # of one stop event followed by swimming with a slow velocity
+        if number_peaks == 1:
+            number_peaks = 2
+
+        # get frames for the particle contained in vel.
+        particle = vel.columns.values
+        t_i = self.t1[self.t1['particle'] == particle[0]]
+        min_value = t_i['frame'].iloc[0]
+        max_value = t_i['frame'].iloc[-1]
+        time = (max_value - min_value)/self.frames_second.value
+
+        # frequency of change
+        change_dir = number_peaks / 2
+        change_dir = np.floor(change_dir)
+
+        frequency = change_dir/time
+
+        return change_dir, time, frequency
 
     def print_ensemble_results(self, data):
 
@@ -1668,55 +1597,12 @@ class UserInterface(object):
                 # get x and y coordinates.
                 results.loc[particle]['x'], results.loc[particle]['y'] = self.get_x_y(t1, particle)
 
-            # Get data for the current particle_id
-            particle_data_full = t1[t1['particle'] == particle_id] 
-            if particle_data_full.empty: continue
+                # get number of change of direction, duration of trajectory and frequency of change of direction
 
-            particle_data_indexed = particle_data_full.set_index('frame')
-
-            vel_df, _ = analysis_utils.calculate_vel(
-                particle_data_indexed, self.frames_second.value, self.pixels_micron.value
-            )
-            if vel_df.empty: continue
-            
-            smooth_cycles_param = self.box6.children[3].value 
-            n_frames_param_smooth = self.box6.children[2].value
-            
-            av_vel_df = vel_df.copy()
-            if smooth_cycles_param > 0 and n_frames_param_smooth > 0:
-                for _ in range(smooth_cycles_param):
-                    av_vel_df = analysis_utils.calculate_average_vel(av_vel_df, threshold=n_frames_param_smooth)
-            
-            if av_vel_df.empty: continue
-
-            av_acc_df = analysis_utils.calculate_av_acc(av_vel_df, self.frames_second.value)
-            if av_acc_df.empty: continue
-
-            if not av_vel_df.empty and len(av_vel_df.columns) > 0:
-                 results.loc[particle_id]['Mean_vel'] = np.average(av_vel_df[av_vel_df.columns[0]].dropna().values)
-            else:
-                 results.loc[particle_id]['Mean_vel'] = np.nan
-
-            results.loc[particle_id]['x'], results.loc[particle_id]['y'] = self.get_x_y(particle_data_full, particle_id)
-            
-            if not av_acc_df.empty and len(av_acc_df.columns) > 0:
-                abs_av_acc_series = abs(av_acc_df[av_acc_df.columns[0]])
-                # Use analysis_utils.get_peaks_data for consistency, passing the block's duration
-                chng_dir, _, chng_dir_sec = analysis_utils.get_peaks_data(
-                    particle_data_full, # For duration calculation based on this particle's presence in block
-                    self.frames_second.value,
-                    abs_av_acc_series, 
-                    self.box6.children[6].value # acc_threshold from adaptation UI for this block
-                )
-                # The duration returned by analysis_utils.get_peaks_data is overall duration of particle.
-                # For block analysis, we need to use the duration_per_block.
-                results.loc[particle_id]['Change_dir'] = chng_dir
-                results.loc[particle_id]['Duration'] = duration_per_block # Key: use fixed block duration
-                results.loc[particle_id]['Change_dir_sec'] = chng_dir / duration_per_block if duration_per_block > 0 else 0
-            else:
-                results.loc[particle_id]['Change_dir'] = 0
-                results.loc[particle_id]['Duration'] = duration_per_block
-                results.loc[particle_id]['Change_dir_sec'] = 0
+                results.loc[particle]['Change_dir'], \
+                results.loc[particle]['Duration'], \
+                results.loc[particle]['Change_dir_sec'] = \
+                self.get_peaks_data_block(abs(av_acc), duration, mph=self.box6.children[6].value)
 
             # At this point, the data frame 'results' contain data for all particles. Now we need to filter for minimum
             # linear velocity threshold.
@@ -1736,30 +1622,20 @@ class UserInterface(object):
             # All information neccesary for the calculation of av_change of direction is
             # contained in the data structure data['Change_dir_sec']
 
-    def get_peaks_data_block(self, acc_series_abs, duration_of_block, mph=None):
-        # This local helper can be simplified or removed if analysis_utils.get_peaks_data
-        # is adapted or used carefully for block-based duration.
-        # For now, let's assume it's a local interpretation for block processing.
-        
-        if acc_series_abs.empty or acc_series_abs.isna().all():
-            return 0.0, duration_of_block, 0.0
+    def get_peaks_data_block(self, acc, duration, mph=None):
 
-        data_np = acc_series_abs.dropna().values
-        peakind = detect_peaks(data_np, mph=mph) 
+        # this function should return the number of change of directions, event duration & frequency of change.
+        # get indices
+        col = acc.columns
+        values = acc[col].dropna().values
+        data = np.asanyarray([i[0] for i in values])
+        peakind = detect_peaks(data, mph=mph)
         number_peaks = len(peakind)
-
-        if number_peaks == 1: 
-            number_peaks = 2
-
-        change_dir = np.floor(number_peaks / 2)
-        
-        frequency = 0.0
-        if duration_of_block > 0:
-            frequency = change_dir / duration_of_block
-        elif change_dir > 0: 
-            frequency = np.inf
-
-        return change_dir, duration_of_block, frequency
+        # frequency of change
+        change_dir = number_peaks / 2
+        change_dir = np.floor(change_dir)
+        frequency = change_dir/duration
+        return change_dir, duration, frequency
 
     def do_adaptation_plot(self, data, threshold=0):
 
@@ -1809,8 +1685,8 @@ class UserInterface(object):
                             f1 = data['Frequency'][t1]
                             adaptation_time = (t2 - t1) / (f2 - f1) * (threshold - f2) + t2
                             break
-            except KeyError: # pragma: no cover
-                print("Adaptation time calculation error: Key not found. Try another threshold or check time intervals.")
+            except KeyError:
+                print("Adaptation time is only defined for positive slopes. Try another threshold value")
 
         else:
             adaptation_time = np.nan
@@ -1891,16 +1767,12 @@ class UserInterface(object):
                 results.loc[particle]['Displacement'], results.loc[particle]['firstFrame'] = get_displacement(self.t1,
                                                                                                               particle)
             self.displacement_3_points = results
-        self.max_displacement_3_points = self.displacement_3_points['Displacement'].max() if not self.displacement_3_points.empty else 0
-    else: # Recalculate max based on current range if points already exist
-        # Ensure frame_range is correctly named 'range' in the original context if this was a direct copy.
-        # Here, 'frame_range_val' is used for clarity, assuming it's passed as 'range' in original.
-        current_frame_range = frame_range_val 
-        results_in_range = self.displacement_3_points[
-            (self.displacement_3_points['firstFrame'] >= current_frame_range[0]) &
-            (self.displacement_3_points['firstFrame'] <= current_frame_range[1])
-        ]
-        self.max_displacement_3_points = results_in_range['Displacement'].max() if not results_in_range.empty else 0
+            self.max_displacement_3_points = self.displacement_3_points['Displacement'].max()
+        else:
+            results = self.displacement_3_points
+            results = results[results['firstFrame'] >= range[0]]
+            results = results[results['firstFrame'] <= range[1]]
+            self.max_displacement_3_points = results['Displacement'].max()
 
     def populate_training_set(self, b):
 
@@ -2032,38 +1904,44 @@ class UserInterface(object):
         b.description = 'Estimate Parameters'
         b.disabled = False
 
-    def eval_fitness_function(self, training_data_df, bounds, individual_ga_params):
-        """
-        DEAP evaluation function wrapper. Calls the core evaluation logic from analysis_utils.
-        This method is registered with DEAP toolbox.
-        """
-        # self.t1, self.frames_second.value, self.pixels_micron.value are instance attributes.
-        # bounds come from self.individuals_bounds[i].value.
-        
-        # The full_eval_fitness_function in analysis_utils handles iterating through training_data_df
-        # and calling core_eval_fitness for each particle.
-        total_error, processing_time = analysis_utils.full_eval_fitness_function(
-            self.t1, 
-            training_data_df, 
-            self.frames_second.value, 
-            self.pixels_micron.value,
-            bounds, 
-            individual_ga_params # These are the raw params from DEAP (e.g., 1-10)
-        )
-        
-        # DEAP expects a tuple of fitness values.
-        # The original code used weights for two objectives: (-obj1, -obj2).
-        # If obj2 (e.g., time) is used, it should be returned here.
-        # Assuming FitnessMin = base.Fitness, weights=(-self.weights_obj1.value, -self.weights_obj2.value)
-        # If self.weights_obj2.value is 0, then processing_time won't affect fitness.
-        # For now, let's match the structure if two weights are possible.
-        # If only total_error is the objective, this should be (total_error,).
-        # The original eval_fitness_function returned (total_error, toc-tic)
-        # And creator.FitnessMin had two weights. So, we should return two values.
-        return total_error, processing_time
+    def eval_fitness_function(self, training_data, bounds, parameters):
 
+        frames_av, smooth, acceleration_threshold = transform_parameters(parameters, bounds)
+        # make sure frames_av is not zero
+        frames_av = frames_av if frames_av != 0 else 1
+        change_dir_vector = []
+        error_vector = []
 
-    def register_deap(self, training_data_df): # Parameter renamed for clarity
+        tic = time.time()
+        for particle in training_data.index.values:
+
+            # calculate velocity
+            vel, acc = self.calculate_vel(self.t1, particle)
+
+            # smooth velocity vector
+            if smooth != 0 and frames_av != 0:
+                av_vel = self.calculate_average_vel(vel, threshold=frames_av)
+                for x in range(0, smooth - 1):
+                    av_vel = self.calculate_average_vel(av_vel, threshold=frames_av)
+            else:
+                av_vel = vel
+
+            # calculate acceleration
+            av_acc = self.calculate_av_acc(av_vel)
+
+            # get number of change of direction, duration of trajectory and frequency of change of direction
+            a, b, c = self.get_peaks_data(abs(av_acc), acceleration_threshold)
+            change_dir_vector.append(a)
+            error_vector.append((a-training_data.loc[particle]['real_chng_dir'])**2)
+
+        training_data['estimated_chng_dir'] = change_dir_vector
+        training_data['delta_sqr'] = error_vector
+        total_error = training_data['delta_sqr'].sum()
+        toc = time.time()
+
+        return total_error, toc-tic
+
+    def register_deap(self, training_data):
 
         generations = self.generations.value
         population = self.population.value
@@ -2091,25 +1969,23 @@ class UserInterface(object):
 
                 toolbox = base.Toolbox()
                 toolbox.register("attr_float", random.random)
-                toolbox.register("attr_int", random.randint, 1, 10) 
+                toolbox.register("attr_int", random.randint, 1, 10)
                 toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_int, n=IND_SIZE)
-                toolbox.register("evaluate", self.eval_fitness_function, training_data_df, bounds) 
+                toolbox.register("evaluate", self.eval_fitness_function, training_data, bounds)
                 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-                toolbox.register("mutate", tools.mutGaussian, mu=5.0, sigma=2.0, indpb=0.2) # Adjusted mu, sigma for 1-10 range
+                toolbox.register("mutate", tools.mutGaussian, mu=0.0, sigma=0.2, indpb=0.2)
                 toolbox.register("mate", tools.cxTwoPoint)
                 toolbox.register("select", tools.selNSGA2)
                 pop = toolbox.population(n=population)
                 halloffame = tools.HallOfFame(2)
-                algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, ngen=generations, verbose=True, halloffame=halloffame)
-                
-                best_params_transformed = analysis_utils.transform_parameters(halloffame[0], bounds)
-                best1_serial = list(best_params_transformed)
+                algorithms.eaSimple(pop, toolbox, cxpb=0.5, mutpb=0.2, ngen=generations, verbose=False, halloffame=halloffame)
+                frames_av, smooth, acceleration_threshold = transform_parameters(halloffame[0], bounds)
+                best1 = [frames_av, smooth, acceleration_threshold]
 
-        else: # Parallel execution
-                generate_deap_excel_data(self.t1, training_data_df, self.frames_second.value, 
-                                         self.pixels_micron.value, self.weights_obj1.value, 
-                                         self.weights_obj2.value, bounds)
-                # Call external process
+        else:
+                generate_deap_excel_data(self.t1, training_data, self.frames_second.value, self.pixels_micron.value,
+                                         self.weights_obj1.value, self.weights_obj2.value, bounds)
+                # call process
                 p = platform.platform()[:5]
                 if p == 'Linux':
                     call_string = 'python -m scoop /opt/conda/lib/python3.6/site-packages/taxispy/run_deap_scoop.py generations='
@@ -2118,62 +1994,24 @@ class UserInterface(object):
                                   'taxispy/run_deap_scoop.py generations='
                 call_string += str(generations)
                 call_string += ' population='
-                call_string += str(population) 
-                
-                try:
-                    # Ensure command is safe if generations/population could be non-numeric
-                    # However, they come from BoundedIntText, so should be fine.
-                    # Using shell=True is generally risky if any part of call_string is from less trusted input.
-                    # For fixed paths and integer parameters, it's less of an immediate risk here.
-                    # A list-based command with subprocess.run would be safer:
-                    # cmd_list = ['python', '-m', 'scoop', script_path, f'generations={generations}', f'population={population}']
-                    # subprocess.run(cmd_list, check=True)
-                    subprocess.run(call_string, shell=True, check=True) 
-                except subprocess.CalledProcessError as e:
-                    print(f"Error during parallel DEAP execution: {e}")
-                    return 
-                except FileNotFoundError:
-                    print(f"Error: Scoop or Python not found for parallel execution.")
-                    return
+                call_string += str(population)
+                os.system(call_string)
+                # retrieve results
+                results = pd.read_excel('results_deap.xlsx', sheet_name=0, index_col=0)
+                frames_av = results.loc['frames_av']['Value']
+                smooth = results.loc['smooth']['Value']
+                acceleration_threshold = results.loc['acceleration_threshold']['Value']
+                best1 = [frames_av, smooth, acceleration_threshold]
+                halloffame_df = pd.read_excel('results_deap.xlsx', sheet_name=1, index_col=0)
+                halloffame = [[halloffame_df.loc[1]["Value"],
+                              halloffame_df.loc[2]["Value"],
+                              halloffame_df.loc[3]["Value"], ]]
+        self.optimal_parameter_set = best1
+        self.optimal_objective_function = self.eval_fitness_function(training_data, bounds, halloffame[0])
 
-                try:
-                    results_df = pd.read_excel('results_deap.xlsx', sheet_name='results_deap', index_col=0)
-                    frames_av_res = results_df.loc['frames_av']['Value']
-                    smooth_res = results_df.loc['smooth']['Value']
-                    acc_thresh_res = results_df.loc['acceleration_threshold']['Value']
-                    best1_parallel_transformed = [frames_av_res, smooth_res, acc_thresh_res]
-                    
-                    halloffame_raw_df = pd.read_excel('results_deap.xlsx', sheet_name='halloffame', index_col=0)
-                    # Assuming halloffame from external script is raw (1-10 like) params
-                    # And index might be string "0", "1", "2" or int 0, 1, 2
-                    # Ensure robust index access:
-                    raw_param_indices = halloffame_raw_df.index.astype(str) if pd.api.types.is_numeric_dtype(halloffame_raw_df.index) else halloffame_raw_df.index
-                                        
-                    halloffame_parallel_raw = [halloffame_raw_df.loc[idx]["Value"] for idx in sorted(raw_param_indices)[:IND_SIZE]]
-
-
-                except FileNotFoundError:
-                    print("Error: results_deap.xlsx not found after parallel execution.")
-                    return
-                except KeyError as e:
-                    print(f"Error reading results_deap.xlsx, sheet or column missing: {e}")
-                    return
-
-        if parallel:
-            self.optimal_parameter_set = best1_parallel_transformed # Already transformed
-            raw_params_for_obj_recalc = halloffame_parallel_raw
-        else: 
-            self.optimal_parameter_set = best1_serial # Already transformed
-            raw_params_for_obj_recalc = halloffame[0] # halloffame[0] from serial is raw
-
-        # Recalculate objective function value for the best raw parameters to store it.
-        # The eval_fitness_function (wrapper) returns a tuple, so take the first element for error.
-        # It's important that self.optimal_objective_function stores the actual fitness tuple from DEAP.
-        self.optimal_objective_function = self.eval_fitness_function(training_data_df, bounds, raw_params_for_obj_recalc)
-
-        self.update_optimal_parameter_set(frames_av=self.optimal_parameter_set[0],
-                                          smooth=self.optimal_parameter_set[1],
-                                          acceleration_threshold=self.optimal_parameter_set[2])
+        self.update_optimal_parameter_set(frames_av=frames_av,
+                                          smooth=smooth,
+                                          acceleration_threshold=acceleration_threshold)
         self.best_parameter_set_html()
 
     def best_parameter_set_html(self):
@@ -2248,34 +2086,15 @@ def get_displacement(t, particle):
     return displacement, first_frame
 
 
-# Removed: transform_parameters (now in analysis_utils)
+def transform_parameters(parameters, bounds):
 
-def generate_deap_excel_data(t1_df, training_data_df, frames_second_val, pixels_micron_val, 
-                             obj1_val, obj2_val, bounds_list):
-    """ Prepares an Excel file with data needed for the external run_deap_scoop.py script. """
-    # Ensure consistent naming with how analysis_utils.py might receive them if it were reading this.
-    # For run_deap_scoop.py, it reads specific sheet names.
-    config_data = {
-        'frames_second': frames_second_val,
-        'pixels_micron': pixels_micron_val,
-        'obj1_weight': obj1_val, # Use more descriptive names for clarity
-        'obj2_weight': obj2_val,
-        'Frames_bound': bounds_list[0],
-        'Smooth_bound': bounds_list[1],
-        'Acceleration_bound': bounds_list[2]
-    }
-    config_df = pd.DataFrame(list(config_data.items()), columns=['Parameter', 'Value'])
+    # unpack and transform
+    frames_av = int(abs(parameters[0] * bounds[0]/10))
+    smooth = int(abs(parameters[1] * bounds[1]/10))
+    acceleration_threshold = abs(parameters[2] * bounds[2]/10)
+    return frames_av, smooth, acceleration_threshold
 
-    try:
-        with pd.ExcelWriter('deap_excel_data.xlsx') as writer:
-            t1_df.to_excel(writer, sheet_name='t1_trajectories') 
-            training_data_df.to_excel(writer, sheet_name='training_data_details') # Use more descriptive sheet names
-            config_df.to_excel(writer, sheet_name='config_and_bounds', index=False)
-    except Exception as e: 
-        print(f"Error writing DEAP Excel data for external script: {e}")
-        # This error should be handled, e.g., by not proceeding with parallel execution.
-
-def generate_adaptation_string(data, smooth=False):
+def generate_deap_excel_data(t1, training_data, frames_second, pixels_micron, obj1, obj2, bounds):
 
     sheet1 = t1
     sheet2 = training_data
