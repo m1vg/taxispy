@@ -10,10 +10,10 @@ dependencies:
   - ipywidgets
   - pims
   - trackpy
-  - deap
-  - scoop
-  - ipython  # For IPython.display and general notebook integration
-  - openpyxl # For pandas Excel I/O (.xlsx)
-  # detect_peaks is a local module, not a conda package
-  # analysis_utils is a local module, not a conda package
-  # Standard library modules like os, math, time, etc., are part of Python
+  - ipython
+  - openpyxl
+  - pip
+  - pip:
+    - scoop
+    - deap 
+
