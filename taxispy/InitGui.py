@@ -21,7 +21,7 @@ from IPython.display import display
 from deap import base, creator, tools, algorithms
 
 __author__ = "Miguel A. Valderrama-Gomez, https://github.com/m1vg"
-__version__ = "0.1.6.3"
+__version__ = "0.1.6.4"
 __license__ = "MIT"
 
 mpl.rc('image', cmap='gray')
