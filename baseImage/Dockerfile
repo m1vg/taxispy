@@ -1,14 +1,21 @@
-FROM jupyter/minimal-notebook
+FROM quay.io/jupyter/minimal-notebook:python-3.11
+
 USER root
-COPY . /Documents
+
+COPY environment.txt /tmp/taxispy-environment.txt
 WORKDIR /Documents
-RUN conda config --add channels bioconda && \
-    conda config --add channels conda-forge && \
-    conda install --yes --file /Documents/environment.txt && \
-    sudo apt-get update -y && sudo apt-get install ffmpeg -y && \
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends libxml2 && \
+    rm -rf /var/lib/apt/lists/* && \
+    mamba install --yes --channel conda-forge --override-channels --file /tmp/taxispy-environment.txt && \
+    python -m pip install --no-cache-dir scoop deap && \
+    conda clean --all --force --yes && \
     fix-permissions $CONDA_DIR && \
     fix-permissions /home/$NB_USER && \
-    rm /Documents/environment.txt
+    mkdir -p /Documents && \
+    chown -R "${NB_UID}:${NB_GID}" /Documents
+
+USER ${NB_UID}
 
 EXPOSE 8888
-CMD jupyter notebook --NotebookApp.token='' --allow-root 
+CMD ["start-notebook.py", "--ServerApp.token=", "--ServerApp.password=", "--ServerApp.root_dir=/Documents"]
